@@ -2,28 +2,347 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="30">
-<title>状态看板</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>向僵尸开炮</title>
 <style>
-  body { max-width: 720px; margin: 0 auto; padding: 24px 16px 64px;
-         font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
-         color: #1f2329; line-height: 1.7; background: #f7f8fa; }
-  .card { background: #fff; border-radius: 12px; padding: 24px;
-          box-shadow: 0 1px 4px rgba(0,0,0,.08); }
-  h1 { font-size: 22px; margin: 0 0 8px; }
-  .status { display: inline-block; padding: 4px 14px; border-radius: 999px;
-            font-size: 14px; background: #e1f5ee; color: #0f6e56; }
-  .meta { color: #8f959e; font-size: 13px; margin-top: 16px; }
-  .content { margin-top: 16px; white-space: pre-wrap; }
+  html, body { margin: 0; padding: 0; overflow: hidden; background: #1a2a1a;
+               font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+  canvas { display: block; touch-action: none; }
+  #hud { position: fixed; top: 8px; left: 0; right: 0; z-index: 5;
+         display: flex; justify-content: center; gap: 24px;
+         font-size: 15px; color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,.7);
+         pointer-events: none; padding: 6px; }
+  #hud b { color: #ffd54f; }
+  #overlay { position: fixed; inset: 0; z-index: 10; display: flex;
+             align-items: center; justify-content: center;
+             background: rgba(0,0,0,.72); color: #fff; text-align: center;
+             flex-direction: column; }
+  #overlay h1 { font-size: 34px; margin: 0 0 6px; color: #ffd54f; letter-spacing: 2px; }
+  #overlay p { font-size: 15px; color: #ddd; margin: 4px 0; }
+  #btn { margin-top: 22px; padding: 14px 46px; font-size: 18px; border: none;
+         border-radius: 999px; background: #ffd54f; color: #332800;
+         font-weight: bold; cursor: pointer; letter-spacing: 2px; }
+  #btn:active { transform: scale(.96); }
+  #tip { position: fixed; bottom: 10px; left: 0; right: 0; text-align: center;
+         font-size: 12px; color: rgba(255,255,255,.55); pointer-events: none; z-index: 5; }
 </style>
 </head>
 <body>
-<div class="card">
-  <h1>状态看板</h1>
-  <span class="status">● 系统就绪</span>
-  <div class="content">等待接入"截屏识别"模块。</div>
-  <div class="meta">页面每 30 秒自动刷新 · EdgeOne Pages 托管</div>
+<div id="hud"><span>生命 <b id="hp">5</b></span><span>波次 <b id="wave">1</b></span><span>得分 <b id="score">0</b></span></div>
+<canvas id="game"></canvas>
+<div id="overlay">
+  <h1>🧟 向僵尸开炮</h1>
+  <p>僵尸来了，守住阵地！自动开炮，点按可瞄准。</p>
+  <button id="btn">开始游戏</button>
 </div>
+<div id="tip">桌面：点击射击 · 手机：点按屏幕射击</div>
+<script>
+"use strict";
+(function () {
+  var canvas = document.getElementById("game");
+  var ctx = canvas.getContext("2d");
+  var overlay = document.getElementById("overlay");
+  var btn = document.getElementById("btn");
+  var elHp = document.getElementById("hp");
+  var elWave = document.getElementById("wave");
+  var elScore = document.getElementById("score");
+
+  var W = 0, H = 0;
+  function resize() {
+    W = canvas.width = window.innerWidth * devicePixelRatio;
+    H = canvas.height = window.innerHeight * devicePixelRatio;
+    canvas.style.width = window.innerWidth + "px";
+    canvas.style.height = window.innerHeight + "px";
+  }
+  window.addEventListener("resize", resize);
+  resize();
+
+  // ---- 游戏状态 ----
+  var state = "menu"; // menu | play | over
+  var zombies = [], bullets = [], particles = [];
+  var score = 0, wave = 1, hp = 5;
+  var lastShot = 0, lastWave = 0, lastSpawn = 0;
+  var targetX = -1, targetY = -1; // 手动瞄准点
+  var killed = 0; // 连杀计数
+
+  // ---- 音频（Web Audio 合成音效，无需素材）----
+  var audioCtx = null;
+  function ensureAudio() {
+    if (!audioCtx) { try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+    if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
+  }
+  function beep(freq, dur, type, vol) {
+    if (!audioCtx) return;
+    var o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.type = type || "square"; o.frequency.value = freq;
+    g.gain.setValueAtTime(vol || 0.12, audioCtx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+    o.connect(g); g.connect(audioCtx.destination);
+    o.start(); o.stop(audioCtx.currentTime + dur);
+  }
+  function sfxShoot() { beep(520, .08, "square", .06); }
+  function sfxHit()   { beep(180, .05, "sawtooth", .05); }
+  function sfxDie()   { beep(320, .22, "sawtooth", .09); }
+  function sfxWave()  { beep(440, .12, "triangle", .1); setTimeout(function(){ beep(660, .15, "triangle", .1); }, 120); }
+  function sfxLose()  { beep(200, .5, "sawtooth", .12); }
+
+  // ---- 实体 ----
+  function spawnWave() {
+    sfxWave();
+    var count = 4 + wave;                 // 数量随波次增长
+    for (var i = 0; i < count; i++) {
+      setTimeout(function () {
+        if (state !== "play") return;
+        var hpZ = 1 + Math.floor(wave / 3);      // 血量逐渐增加
+        var spd = 26 + Math.min(40, wave * 2.2) + Math.random() * 22; // px/s
+        zombies.push({
+          x: W + 40, y: H * (0.18 + Math.random() * 0.55),
+          hp: hpZ, maxHp: hpZ, spd: spd,
+          t: Math.random() * 6,          // 摇摆相位
+          die: false, dieT: 0, flash: 0, size: 26 + Math.random() * 14
+        });
+      }, i * 260);
+    }
+    wave++;
+    lastWave = performance.now();
+  }
+
+  function shoot(angle) {
+    var px = W / 2, py = H - 70 * devicePixelRatio * 0.5 + 20;
+    bullets.push({ x: px, y: py, vx: Math.cos(angle) * 620, vy: Math.sin(angle) * 620, life: 2 });
+    sfxShoot();
+  }
+
+  function explode(x, y, color, n) {
+    for (var i = 0; i < n; i++) {
+      var a = Math.random() * Math.PI * 2, s = 60 + Math.random() * 160;
+      particles.push({ x: x, y: y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: .5, t: 0, c: color, s: 3 + Math.random() * 4 });
+    }
+  }
+
+  function damageZombie(z, dmg) {
+    z.hp -= dmg; z.flash = .12;
+    explode(z.x, z.y - z.size / 2, "#a33", 3);
+    sfxHit();
+    if (z.hp <= 0 && !z.die) {
+      z.die = true; z.dieT = 0; killed++;
+      var bonus = killed >= 5 ? 2 : 1;   // 连杀加成
+      score += 10 * bonus;
+      explode(z.x, z.y - z.size / 2, "#6a4", 12);
+      sfxDie();
+    }
+  }
+
+  function gameOver() {
+    state = "over";
+    sfxLose();
+    overlay.innerHTML =
+      "<h1>💀 游戏结束</h1>" +
+      "<p>得分：<b style='color:#ffd54f'>" + score + "</b></p>" +
+      "<p>坚守波次：" + wave + "</p>" +
+      "<button id='btn'>再玩一次</button>";
+    document.getElementById("btn").onclick = startGame;
+  }
+
+  function startGame() {
+    ensureAudio();
+    zombies = []; bullets = []; particles = [];
+    score = 0; wave = 1; hp = 5; killed = 0;
+    lastWave = performance.now() - 3000;
+    updateHud();
+    overlay.style.display = "none";
+    state = "play";
+  }
+
+  function updateHud() {
+    elHp.textContent = hp; elWave.textContent = wave; elScore.textContent = score;
+  }
+
+  // ---- 主循环 ----
+  var last = performance.now();
+  function loop(now) {
+    var dt = Math.min((now - last) / 1000, .05);
+    last = now;
+    ctx.clearRect(0, 0, W, H);
+    drawBackground();
+
+    if (state === "play") {
+      // 波次推进
+      if (now - lastWave > 6000) spawnWave();
+      // 生成残余（补满波次）
+      if (now - lastSpawn > 300 && zombies.length < 2 + wave * 2 && now - lastWave > 2500) {
+        var hpZ = 1 + Math.floor(wave / 3), spd = 26 + Math.min(40, wave * 2.2) + Math.random() * 22;
+        zombies.push({ x: W + 40, y: H * (0.18 + Math.random() * 0.55), hp: hpZ, maxHp: hpZ,
+          spd: spd, t: Math.random() * 6, die: false, dieT: 0, flash: 0, size: 26 + Math.random() * 14 });
+        lastSpawn = now;
+      }
+
+      // 自动瞄准最近的僵尸
+      var nearest = null, best = 1e9;
+      for (var i = 0; i < zombies.length; i++) {
+        var z = zombies[i]; if (z.die) continue;
+        var d = (z.x - W / 2) * (z.x - W / 2) + (z.y - H * .8) * (z.y - H * .8);
+        if (d < best) { best = d; nearest = z; }
+      }
+      var px = W / 2, py = H - 70;
+      var angle;
+      if (nearest) angle = Math.atan2(nearest.y - py, nearest.x - px);
+      else angle = Math.atan2(-1, 0);
+      if (targetX >= 0) { angle = Math.atan2(targetY - py, targetX - px); targetX = -1; }
+      if (now - lastShot > 180) { shoot(angle); lastShot = now; }
+      drawTower(angle, now);
+
+      // 子弹
+      for (var i = bullets.length - 1; i >= 0; i--) {
+        var b = bullets[i];
+        b.x += b.vx * dt; b.y += b.vy * dt; b.life -= dt;
+        var hit = false;
+        for (var j = 0; j < zombies.length; j++) {
+          var z2 = zombies[j];
+          if (z2.die) continue;
+          if ((b.x - z2.x) * (b.x - z2.x) + (b.y - (z2.y - z2.size / 2)) * (b.y - (z2.y - z2.size / 2)) < z2.size * z2.size) {
+            hit = true; damageZombie(z2, 1); break;
+          }
+        }
+        if (hit || b.life <= 0 || b.x > W + 30 || b.x < -30) bullets.splice(i, 1);
+      }
+
+      // 僵尸移动
+      for (var i = zombies.length - 1; i >= 0; i--) {
+        var z3 = zombies[i];
+        z3.t += dt;
+        if (!z3.die) {
+          z3.x -= z3.spd * dt;
+          z3.y += Math.sin(z3.t * 4) * 0.8;
+          if (z3.flash > 0) z3.flash -= dt;
+          if (z3.x < 20) {  // 到达炮塔
+            zombies.splice(i, 1); hp--; updateHud(); sfxLose();
+            explode(W / 2, H - 70, "#f55", 14);
+            if (hp <= 0) gameOver();
+            continue;
+          }
+        } else {
+          z3.dieT += dt;
+          if (z3.dieT > .6) { zombies.splice(i, 1); continue; }
+        }
+      }
+      updateHud();
+    }
+
+    // 粒子
+    for (var i = particles.length - 1; i >= 0; i--) {
+      var p = particles[i];
+      p.t += dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 300 * dt;
+      if (p.t > p.life) { particles.splice(i, 1); continue; }
+      ctx.globalAlpha = 1 - p.t / p.life;
+      ctx.fillStyle = p.c;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.s, 0, 7); ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+
+    // 僵尸绘制（含死亡动画）
+    for (var i = 0; i < zombies.length; i++) {
+      var z4 = zombies[i];
+      if (z4.die) {
+        ctx.save();
+        ctx.translate(z4.x, z4.y - z4.size / 2);
+        ctx.rotate((1 - z4.dieT / .6) * 1.2);
+        ctx.globalAlpha = 1 - z4.dieT / .6;
+        drawZombieBody(z4);
+        ctx.restore();
+        continue;
+      }
+      ctx.save();
+      if (z4.flash > 0) ctx.filter = "brightness(2)";
+      drawZombieBody(z4);
+      ctx.restore();
+      // 血条
+      if (z4.maxHp > 1) {
+        var bw = z4.size, ratio = z4.hp / z4.maxHp;
+        ctx.fillStyle = "#300"; ctx.fillRect(z4.x - bw / 2, z4.y - z4.size - 10, bw, 4);
+        ctx.fillStyle = "#4c4"; ctx.fillRect(z4.x - bw / 2, z4.y - z4.size - 10, bw * ratio, 4);
+      }
+    }
+
+    requestAnimationFrame(loop);
+  }
+
+  // ---- 绘制 ----
+  function drawBackground() {
+    var g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, "#0e2a47"); g.addColorStop(.5, "#3a6ea5"); g.addColorStop(1, "#2e5d3a");
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    // 月亮
+    ctx.fillStyle = "#f8f3c9"; ctx.beginPath(); ctx.arc(W * .85, H * .12, 26, 0, 7); ctx.fill();
+    // 草地
+    ctx.fillStyle = "#2e5d3a"; ctx.fillRect(0, H * .82, W, H * .18);
+    ctx.fillStyle = "#3a7a48"; ctx.fillRect(0, H * .82, W, 6);
+    // 装饰草
+    ctx.fillStyle = "#4c8f58";
+    for (var i = 0; i < 30; i++) {
+      var gx = (i * 137) % W, gy = H * .84 + ((i * 53) % (H * .1));
+      ctx.fillRect(gx, gy, 2, 8);
+    }
+  }
+
+  function drawTower(angle, now) {
+    var px = W / 2, py = H - 70;
+    // 底座
+    ctx.fillStyle = "#5a6a5a";
+    ctx.beginPath(); ctx.arc(px, py, 34, 0, 7); ctx.fill();
+    ctx.fillStyle = "#7a8a7a";
+    ctx.beginPath(); ctx.arc(px, py - 6, 28, 0, 7); ctx.fill();
+    // 炮管
+    var recoil = now - lastShot < 60 ? 6 : 0;
+    ctx.save();
+    ctx.translate(px, py - 10); ctx.rotate(angle);
+    ctx.fillStyle = "#3a4a3a";
+    ctx.fillRect(-8, -10, 30 + 16 - recoil, 20);
+    ctx.fillStyle = "#ffd54f";
+    ctx.fillRect(18 - recoil, -6, 10, 12);
+    ctx.restore();
+  }
+
+  function drawZombieBody(z) {
+    var s = z.size, x = z.x, y = z.y - s / 2;
+    // 身体
+    ctx.fillStyle = "#5d8a4a";
+    ctx.beginPath(); ctx.ellipse(x, y, s * .55, s * .75, 0, 0, 7); ctx.fill();
+    // 手臂（摇摆）
+    var arm = Math.sin(z.t * 4) * .4;
+    ctx.strokeStyle = "#4a7040"; ctx.lineWidth = s * .2;
+    ctx.beginPath(); ctx.moveTo(x - s * .35, y); ctx.lineTo(x - s * .65, y + s * .5 * (1 + arm)); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x + s * .35, y); ctx.lineTo(x + s * .65, y + s * .5 * (1 - arm)); ctx.stroke();
+    // 头
+    ctx.fillStyle = "#6d9a58";
+    ctx.beginPath(); ctx.arc(x, y - s * .95, s * .42, 0, 7); ctx.fill();
+    // 眼睛
+    ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(x - s * .15, y - s * 1.0, s * .12, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.arc(x + s * .15, y - s * 1.0, s * .12, 0, 7); ctx.fill();
+    ctx.fillStyle = "#900";
+    ctx.beginPath(); ctx.arc(x - s * .12, y - s * 1.0, s * .06, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.arc(x + s * .18, y - s * 1.0, s * .06, 0, 7); ctx.fill();
+    // 嘴
+    ctx.strokeStyle = "#3a2a1a"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(x - s * .18, y - s * .7); ctx.lineTo(x + s * .18, y - s * .7); ctx.stroke();
+  }
+
+  // ---- 交互 ----
+  function pointer(e) {
+    ensureAudio();
+    if (state !== "play") return;
+    var r = canvas.getBoundingClientRect();
+    var ex = (e.clientX - r.left) * devicePixelRatio;
+    var ey = (e.clientY - r.top) * devicePixelRatio;
+    targetX = ex; targetY = ey;
+  }
+  canvas.addEventListener("mousedown", pointer);
+  canvas.addEventListener("touchstart", function (e) { e.preventDefault(); pointer(e.touches[0]); }, { passive: false });
+
+  btn.onclick = startGame;
+
+  requestAnimationFrame(loop);
+})();
+</script>
 </body>
 </html>
