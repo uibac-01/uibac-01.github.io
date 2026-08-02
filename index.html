@@ -17,7 +17,10 @@
          color:#fff; font-size:15px; box-shadow:0 4px 18px rgba(0,0,0,.45);
          pointer-events:none; }
   #hud .it { display:flex; align-items:center; gap:6px; }
-  #hud .ic { font-size:17px; }
+  #hud .uic { width:24px; height:24px; background-size:300% 100%; background-repeat:no-repeat; }
+  #hud .ic-hp   { background-image:url('assets/ui_s.png'); background-position:50% 0; }
+  #hud .ic-wave { background-image:url('assets/ui_s.png'); background-position:100% 0; }
+  #hud .ic-score{ background-image:url('assets/ui_s.png'); background-position:0 0; }
   #hud b { color:#ffd54f; font-size:17px; min-width:20px; text-align:center; }
   /* ===== 波次横幅 ===== */
   #banner { position:fixed; top:26%; left:0; right:0; z-index:7; text-align:center;
@@ -50,9 +53,9 @@
 <body>
 <div id="loading">🎮 正在加载战场…</div>
 <div id="hud">
-  <span class="it"><span class="ic">❤️</span><b id="hp">5</b></span>
-  <span class="it"><span class="ic">🌊</span>波次 <b id="wave">1</b></span>
-  <span class="it"><span class="ic">🏆</span><b id="score">0</b></span>
+  <span class="it"><span class="uic ic-hp"></span><b id="hp">5</b></span>
+  <span class="it"><span class="uic ic-wave"></span>波次 <b id="wave">1</b></span>
+  <span class="it"><span class="uic ic-score"></span><b id="score">0</b></span>
 </div>
 <div id="banner"></div>
 <canvas id="game"></canvas>
@@ -74,8 +77,8 @@
   var banner = document.getElementById("banner");
 
   // ===== 素材 =====
-  var assets = { bg:null, tower:null, z:[] };
-  var need = 1 + 1 + 5, ready = 0;
+  var assets = { bg:null, tower:null, bullet:null, elite:null, z:[] };
+  var need = 9, ready = 0;
   function loadImg(arr, name, src) {
     var img = new Image();
     img.onload = function(){ arr[name]=img; done(); };
@@ -85,6 +88,8 @@
   function done(){ ready++; if (ready >= need) start(); }
   loadImg(assets, "bg", "assets/bg_s.jpg");
   loadImg(assets, "tower", "assets/tower_s.png");
+  loadImg(assets, "bullet", "assets/bullet_s.png");
+  loadImg(assets, "elite", "assets/elite_s.png");
   ["z1","z2","z3","z4","zdie"].forEach(function(n, i){
     var img = new Image();
     img.onload = function(){ assets.z[i]=img; done(); };
@@ -121,15 +126,22 @@
   var sfxPulse=function(){ beep(80,.15,"sine",.12); };
 
   // ===== 生成 =====
-  function addZombie(){
-    var hpZ=1+Math.floor(wave/3), spd=(22+Math.min(46,wave*2.3)+Math.random()*20)*DPR;
+  function addZombie(isElite){
+    var elite = !!isElite;
+    var hpZ = elite ? 3 + Math.floor(wave/3) : 1 + Math.floor(wave/3);
+    var spd = elite ? (14 + Math.min(20, wave*1.2) + Math.random()*6)*DPR
+                    : (22+Math.min(46,wave*2.3)+Math.random()*20)*DPR;
     zombies.push({x:W+70*DPR, y:H*(.12+Math.random()*.5), hp:hpZ, maxHp:hpZ, spd:spd,
-      t:Math.random()*6, die:false, dieT:0, flash:0, size:(34+Math.random()*16)*DPR, animT:Math.random()*10, bob:0});
+      t:Math.random()*6, die:false, dieT:0, flash:0, size:elite?(60+Math.random()*12)*DPR:(34+Math.random()*16)*DPR,
+      animT:Math.random()*10, bob:0, elite:elite});
+    if(elite) sfxPulse();
   }
   function spawnWave(){
     sfxWave(); showBanner("🌊 第 " + wave + " 波", "僵尸数量增加！");
     var n=3+wave;
     for(var i=0;i<n;i++) (function(d){ setTimeout(function(){ if(state==="play") addZombie(); }, d); })(i*220);
+    // 每 5 波出一只精英僵尸
+    if(wave%5===0){ setTimeout(function(){ if(state==="play") addZombie(true); }, 600); }
     wave++; lastWave=performance.now(); shake=8;
   }
   function showBanner(main, sub){
@@ -158,8 +170,10 @@
     explode(z.x, z.y-z.size/2, "#ffb84d", 4, 120); blood(z.x, z.y-z.size/2);
     if(z.hp<=0 && !z.die){
       z.die=true; z.dieT=0; killed++; combo++; timeScale=.45;
-      var bonus = combo>=5?2:1; score+=10*bonus;
-      floatText(z.x, z.y-z.size, (bonus>1?"连杀 ×"+combo+" +"+(10*bonus):"+"+(10*bonus)));
+      var bonus = combo>=5?2:1;
+      var gain = z.elite ? 50 : 10*bonus;
+      score += gain;
+      floatText(z.x, z.y-z.size, (z.elite?"💎 +"+gain : (bonus>1?"连杀 ×"+combo+" +"+gain:"+"+gain)));
       blood(z.x, z.y-z.size/2); blood(z.x+10*DPR, z.y-z.size*.6);
       explode(z.x, z.y-z.size/2, "#7a3", 10, 180); explode(z.x, z.y-z.size/2, "#a22", 6, 220);
       sfxDie(); shake=Math.max(shake,7);
@@ -286,12 +300,15 @@
     // 僵尸
     for(var i=0;i<zombies.length;i++){ var z4=zombies[i]; drawZombie(z4); }
 
-    // 子弹
+    // 子弹（贴图 + 拖尾）
     for(var i=0;i<bullets.length;i++){ var b=bullets[i];
       for(var k=0;k<b.trail.length;k++){ ctx.globalAlpha=k/b.trail.length*.5; ctx.fillStyle="#ffd54f";
         ctx.beginPath(); ctx.arc(b.trail[k].x,b.trail[k].y,(2.5+k)*DPR,0,7); ctx.fill(); }
-      ctx.globalAlpha=1; ctx.fillStyle="#fff3b0"; ctx.shadowColor="#ffd54f"; ctx.shadowBlur=12*DPR;
-      ctx.beginPath(); ctx.arc(b.x,b.y,5*DPR,0,7); ctx.fill(); ctx.shadowBlur=0; }
+      ctx.globalAlpha=1;
+      var bs=(18*DPR)*(i%2? .9:1);
+      if(assets.bullet){ ctx.drawImage(assets.bullet, b.x-bs/2, b.y-bs/2, bs, bs); }
+      else { ctx.fillStyle="#fff3b0"; ctx.shadowColor="#ffd54f"; ctx.shadowBlur=12*DPR;
+        ctx.beginPath(); ctx.arc(b.x,b.y,5*DPR,0,7); ctx.fill(); ctx.shadowBlur=0; } }
 
     // 粒子
     for(var i=0;i<particles.length;i++){ var p=particles[i];
@@ -314,26 +331,37 @@
 
   function drawZombie(z){
     if(z.die){ // 死亡：倒地帧 + 旋转下坠渐隐
-      var img=assets.z[4]; if(!img) return;
+      var img = z.elite ? (assets.elite||assets.z[4]) : assets.z[4];
+      if(!img) return;
       ctx.save(); ctx.translate(z.x, z.y-z.size/2);
       ctx.rotate(Math.min(1,z.dieT*2.2));
       ctx.globalAlpha=Math.max(0,1-z.dieT/.6);
       ctx.drawImage(img, -z.size/2, -z.size/2, z.size, z.size); ctx.restore();
       return;
     }
-    // 行走帧动画
-    var fIdx = Math.floor(z.animT*7) % 4;
-    var img = assets.z[fIdx] || assets.z[0];
-    ctx.save();
-    ctx.translate(z.x, z.y-z.size);
-    if(z.flash>0){ ctx.filter="brightness(1.9) saturate(.3)"; }
-    ctx.drawImage(img, -z.size/2, -z.size*.75, z.size, z.size);
-    ctx.restore();
+    // 精英僵尸：固定贴图 + 呼吸动画
+    if(z.elite && assets.elite){
+      ctx.save();
+      var pulse=1+Math.sin(z.t*5)*.04;
+      ctx.translate(z.x, z.y-z.size*.8);
+      if(z.flash>0) ctx.filter="brightness(2)";
+      ctx.drawImage(assets.elite, -z.size/2*pulse, -z.size*.6*pulse, z.size*pulse, z.size*pulse);
+      ctx.restore();
+    } else {
+      // 普通僵尸：行走帧动画
+      var fIdx = Math.floor(z.animT*7) % 4;
+      var img = assets.z[fIdx] || assets.z[0];
+      ctx.save();
+      ctx.translate(z.x, z.y-z.size);
+      if(z.flash>0){ ctx.filter="brightness(1.9) saturate(.3)"; }
+      ctx.drawImage(img, -z.size/2, -z.size*.75, z.size, z.size);
+      ctx.restore();
+    }
     // 血条
     if(z.maxHp>1){ var bw=z.size, ratio=Math.max(0,z.hp/z.maxHp);
       ctx.fillStyle="rgba(0,0,0,.55)"; ctx.fillRect(z.x-bw/2, z.y-z.size-12*DPR, bw, 5*DPR);
-      ctx.fillStyle="#5c5"; ctx.fillRect(z.x-bw/2, z.y-z.size-12*DPR, bw*ratio, 5*DPR);
-      ctx.fillStyle="#3a3"; ctx.fillRect(z.x-bw/2+bw*ratio, z.y-z.size-12*DPR, bw*(1-ratio), 5*DPR); }
+      ctx.fillStyle=z.elite?"#c33":"#5c5"; ctx.fillRect(z.x-bw/2, z.y-z.size-12*DPR, bw*ratio, 5*DPR);
+      ctx.fillStyle=z.elite?"#700":"#3a3"; ctx.fillRect(z.x-bw/2+bw*ratio, z.y-z.size-12*DPR, bw*(1-ratio), 5*DPR); }
   }
 
   // ===== 交互 =====
